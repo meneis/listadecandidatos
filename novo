@@ -1,0 +1,2500 @@
+/**
+ * ==========================================================
+ * CATÁLOGO DE PEÇAS DE CAMPANHA - EP 2026
+ * ==========================================================
+ *
+ * ESTRUTURA DA PLANILHA
+ *
+ * A - Nome da peça
+ * B - Deputado Federal
+ * C - Deputado Estadual
+ * D - Tipo de peça
+ * E - Usuário
+ * F - Data de postagem
+ * G - Creator
+ * H - Data de criação do arquivo
+ * I - ID do arquivo (chave principal)
+ *
+ * ==========================================================
+ *
+ * PRINCÍPIO DO SISTEMA
+ *
+ * O ID da coluna I é a chave única do registro.
+ *
+ * O nome do arquivo pode mudar.
+ * O nome pode ser usado para recalcular:
+ *
+ * - Deputado Federal
+ * - Deputado Estadual
+ * - Tipo de peça
+ *
+ * Mas a identificação do registro é sempre feita pelo ID.
+ *
+ * ==========================================================
+ *
+ * FUNÇÕES PRINCIPAIS
+ *
+ * atualizarPlanilha()
+ *     Sincroniza o Drive com a planilha.
+ *
+ * atualizarMetadados()
+ *     Processa até 30 PDFs que ainda não possuem
+ *     Creator e/ou Data de criação.
+ *
+ * restaurarLinksNomes()
+ *     Reconstrói os links da coluna A usando o ID da
+ *     coluna I.
+ *
+ * ==========================================================
+ */
+
+
+// ==========================================================
+// CONFIGURAÇÃO
+// ==========================================================
+
+var FOLDER_ID = "139anP3B7Hv-VEyyRVo69nsvU_y3T5ev9";
+
+var SHEET_NAME = "Peças";
+
+var LIMITE_METADADOS = 30;
+
+
+// ==========================================================
+// CABEÇALHOS
+// ==========================================================
+
+var HEADERS = [
+    "Nome da peça",
+    "Deputado Federal",
+    "Deputado Estadual",
+    "Tipo de peça",
+    "Usuário",
+    "Data de postagem",
+    "Creator",
+    "Data de criação do arquivo",
+    "ID do arquivo (não editar)"
+];
+
+
+// ==========================================================
+// MAPA DE TIPOS DE PEÇA
+// ==========================================================
+
+var TIPO_MAP = {
+
+    "santinho": "SANTINHO 70x100mm",
+    "cedula": "SANTINHO 70x100mm",
+
+    "santao": "SANTÃO 100x140mm",
+    "panfleto": "SANTÃO 100x140mm",
+
+    "225x150mm": "ADESIVO 225x150mm",
+    "adesivo": "ADESIVO 450x150mm",
+
+    "praguinha": "PRAGUINHA 100x100mm",
+
+    "bandeira": "BANDEIRA 1400x900mm",
+
+    "cartao": "CARTÃO 90x50mm",
+    "90x50mm": "CARTÃO 90x50mm",
+
+    "perfurado": "PERFURADO 800x400mm",
+    "microperfurado": "PERFURADO 800x400mm",
+    "perfurate": "PERFURADO 800x400mm",
+    "adesivoperfurado": "PERFURADO 800x400mm",
+
+    "flyer": "FLYER 150x210mm",
+
+    "jornal": "JORNAL"
+};
+
+
+// ==========================================================
+// MENU
+// ==========================================================
+
+function onOpen() {
+
+    SpreadsheetApp
+        .getUi()
+        .createMenu("Campanha EP 2026")
+
+        .addItem(
+            "Atualizar catálogo",
+            "atualizarPlanilha"
+        )
+
+        .addItem(
+            "Atualizar metadados (30)",
+            "atualizarMetadados"
+        )
+
+        .addItem(
+            "Restaurar links dos nomes",
+            "restaurarLinksNomes"
+        )
+
+        .addSeparator()
+
+        .addItem(
+            "Criar / recriar gatilho",
+            "criarGatilhos"
+        )
+
+        .addToUi();
+}
+
+
+// ==========================================================
+// FUNÇÃO PRINCIPAL
+// ==========================================================
+//
+// Sincroniza o conteúdo do Google Drive com a planilha.
+//
+// NÃO lê nem baixa o conteúdo dos PDFs.
+//
+// Apenas:
+//
+// - localiza os PDFs;
+// - compara pelo ID;
+// - adiciona novos;
+// - remove inexistentes;
+// - atualiza arquivos renomeados;
+// - preserva os demais dados.
+//
+// ==========================================================
+
+function atualizarPlanilha() {
+
+    var lock = LockService.getScriptLock();
+
+    try {
+
+        lock.waitLock(10000);
+
+    } catch (e) {
+
+        Logger.log(
+            "Execução ignorada: outra instância já está rodando."
+        );
+
+        return;
+    }
+
+    try {
+
+        atualizarPlanilhaInterno();
+
+    } finally {
+
+        lock.releaseLock();
+    }
+}
+
+
+// ==========================================================
+// SINCRONIZAÇÃO INTERNA
+// ==========================================================
+
+function atualizarPlanilhaInterno() {
+
+    var inicioTotal = new Date().getTime();
+
+    Logger.log("==========================================");
+    Logger.log("ATUALIZAÇÃO DO CATÁLOGO");
+    Logger.log("==========================================");
+
+
+    // ------------------------------------------------------
+    // CONFERE CONFIGURAÇÃO
+    // ------------------------------------------------------
+
+    if (!FOLDER_ID) {
+
+        throw new Error(
+            "FOLDER_ID não configurado."
+        );
+    }
+
+
+    // ------------------------------------------------------
+    // ABRE PLANILHA
+    // ------------------------------------------------------
+
+    var ss =
+        SpreadsheetApp.getActiveSpreadsheet();
+
+    var sheet =
+        ss.getSheetByName(SHEET_NAME);
+
+
+    if (!sheet) {
+
+        sheet =
+            ss.insertSheet(SHEET_NAME);
+
+    }
+
+
+    // ------------------------------------------------------
+    // GARANTE CABEÇALHO
+    // ------------------------------------------------------
+
+    garantirCabecalho(sheet);
+
+
+    // ------------------------------------------------------
+    // LÊ REGISTROS EXISTENTES
+    // ------------------------------------------------------
+
+    var lastRow =
+        sheet.getLastRow();
+
+    var existingById = {};
+
+    if (lastRow > 1) {
+
+        var data =
+            sheet
+                .getRange(
+                    2,
+                    1,
+                    lastRow - 1,
+                    9
+                )
+                .getValues();
+
+        for (var r = 0; r < data.length; r++) {
+
+            var id =
+                String(data[r][8] || "").trim();
+
+            if (!id) {
+                continue;
+            }
+
+            existingById[id] = {
+
+                rowNumber: r + 2,
+
+                name: String(
+                    data[r][0] || ""
+                )
+
+            };
+        }
+    }
+
+
+    Logger.log(
+        "Registros existentes na planilha: " +
+        Object.keys(existingById).length
+    );
+
+
+    // ------------------------------------------------------
+    // LOCALIZA PDFs
+    // ------------------------------------------------------
+
+    var inicioBusca =
+        new Date().getTime();
+
+    var rootFolder =
+        DriveApp.getFolderById(FOLDER_ID);
+
+    var allFiles = [];
+
+    scanFolderRecursive(
+        rootFolder,
+        allFiles
+    );
+
+    var fimBusca =
+        new Date().getTime();
+
+
+    Logger.log(
+        "PDFs encontrados no Drive: " +
+        allFiles.length
+    );
+
+    Logger.log(
+        "Tempo para localizar PDFs: " +
+        (
+            (fimBusca - inicioBusca) /
+            1000
+        ).toFixed(3) +
+        " segundos"
+    );
+
+
+    // ------------------------------------------------------
+    // ÍNDICE DOS ARQUIVOS PELO ID
+    // ------------------------------------------------------
+
+    var currentById = {};
+
+    allFiles.forEach(
+        function (file) {
+
+            currentById[
+                file.getId()
+            ] = file;
+
+        }
+    );
+
+
+    // ======================================================
+    // 1. ARQUIVOS REMOVIDOS
+    // ======================================================
+
+    var rowsToDelete = [];
+
+    Object.keys(existingById)
+        .forEach(
+            function (id) {
+
+                if (!currentById[id]) {
+
+                    rowsToDelete.push(
+                        existingById[id].rowNumber
+                    );
+
+                }
+
+            }
+        );
+
+
+    // Exclui de baixo para cima
+
+    rowsToDelete.sort(
+        function (a, b) {
+            return b - a;
+        }
+    );
+
+
+    rowsToDelete.forEach(
+        function (rowNumber) {
+
+            sheet.deleteRow(
+                rowNumber
+            );
+
+        }
+    );
+
+
+    // ======================================================
+    // 2. ARQUIVOS RENOMEADOS
+    // ======================================================
+
+    var renomeados = 0;
+
+    Object.keys(existingById)
+        .forEach(
+            function (id) {
+
+                var registro =
+                    existingById[id];
+
+                var file =
+                    currentById[id];
+
+
+                if (!file) {
+                    return;
+                }
+
+
+                var currentName =
+                    file.getName();
+
+
+                if (
+                    currentName ===
+                    registro.name
+                ) {
+                    return;
+                }
+
+
+                var parsed =
+                    parseFileName(
+                        currentName
+                    );
+
+
+                // ------------------------------------------------
+                // Atualiza somente os campos derivados do nome.
+                //
+                // NÃO altera:
+                // Usuário
+                // Data de postagem
+                // Creator
+                // Data de criação
+                // ID
+                // ------------------------------------------------
+
+                sheet
+                    .getRange(
+                        registro.rowNumber,
+                        1
+                    )
+                    .setRichTextValue(
+
+                        criarRichTextLink(
+                            currentName,
+                            file.getUrl()
+                        )
+
+                    );
+
+
+                sheet
+                    .getRange(
+                        registro.rowNumber,
+                        2
+                    )
+                    .setValue(
+                        parsed.deputadoFederal
+                    );
+
+
+                sheet
+                    .getRange(
+                        registro.rowNumber,
+                        3
+                    )
+                    .setValue(
+                        parsed.deputadoEstadual
+                    );
+
+
+                sheet
+                    .getRange(
+                        registro.rowNumber,
+                        4
+                    )
+                    .setValue(
+                        parsed.tipo
+                    );
+
+
+                renomeados++;
+
+            }
+        );
+
+
+    // ======================================================
+    // 3. ARQUIVOS NOVOS
+    // ======================================================
+
+    var newRows = [];
+
+    var newLinks = [];
+
+    var foraDoPadrao = 0;
+
+
+    allFiles.forEach(
+        function (file) {
+
+            var id =
+                file.getId();
+
+
+            // Já existe pelo ID
+
+            if (
+                existingById
+                    .hasOwnProperty(id)
+            ) {
+                return;
+            }
+
+
+            var name =
+                file.getName();
+
+
+            var parsed =
+                parseFileName(name);
+
+
+            if (
+                !parsed.deputadoFederal &&
+                !parsed.deputadoEstadual &&
+                !parsed.tipo
+            ) {
+
+                foraDoPadrao++;
+
+            }
+
+
+            // ------------------------------------------------
+            // DATA DE POSTAGEM
+            //
+            // É a data em que o arquivo entrou no Drive.
+            // ------------------------------------------------
+
+            var postedDate =
+                Utilities.formatDate(
+                    file.getDateCreated(),
+                    Session.getScriptTimeZone(),
+                    "dd/MM/yyyy HH:mm"
+                );
+
+
+            // ------------------------------------------------
+            // USUÁRIO
+            // ------------------------------------------------
+
+            var owner = "";
+
+            try {
+
+                var ownerObj =
+                    file.getOwner();
+
+                owner =
+                    ownerObj
+                        ? ownerObj.getEmail()
+                        : "";
+
+            } catch (e) {
+
+                owner = "";
+
+            }
+
+
+            // ------------------------------------------------
+            // NOVA LINHA
+            // ------------------------------------------------
+
+            newRows.push([
+
+                name,                       // A
+                parsed.deputadoFederal,     // B
+                parsed.deputadoEstadual,    // C
+                parsed.tipo,                // D
+                owner,                      // E
+                postedDate,                 // F
+                "",                         // G Creator
+                "",                         // H Creation Date
+                id                          // I ID
+
+            ]);
+
+
+            newLinks.push(
+                file.getUrl()
+            );
+
+        }
+    );
+
+
+    // ======================================================
+    // 4. GRAVA NOVOS ARQUIVOS
+    // ======================================================
+
+    if (newRows.length > 0) {
+
+        var startRow =
+            sheet.getLastRow() + 1;
+
+
+        sheet
+            .getRange(
+                startRow,
+                1,
+                newRows.length,
+                9
+            )
+            .setValues(
+                newRows
+            );
+
+
+        // --------------------------------------------------
+        // RECRIA A COLUNA A COMO LINK
+        // --------------------------------------------------
+
+        var richValues =
+            newRows.map(
+                function (row, i) {
+
+                    return [
+
+                        criarRichTextLink(
+                            row[0],
+                            newLinks[i]
+                        )
+
+                    ];
+
+                }
+            );
+
+
+        sheet
+            .getRange(
+                startRow,
+                1,
+                newRows.length,
+                1
+            )
+            .setRichTextValues(
+                richValues
+            );
+
+    }
+
+
+    SpreadsheetApp.flush();
+
+
+    // ======================================================
+    // RESUMO
+    // ======================================================
+
+    var fimTotal =
+        new Date().getTime();
+
+
+    Logger.log("");
+    Logger.log("==========================================");
+    Logger.log("RESUMO DA ATUALIZAÇÃO");
+    Logger.log("==========================================");
+
+    Logger.log(
+        "Novos: " +
+        newRows.length
+    );
+
+    Logger.log(
+        "Removidos: " +
+        rowsToDelete.length
+    );
+
+    Logger.log(
+        "Renomeados: " +
+        renomeados
+    );
+
+    Logger.log(
+        "Fora do padrão: " +
+        foraDoPadrao
+    );
+
+    Logger.log(
+        "Tempo total: " +
+        (
+            (fimTotal - inicioTotal) /
+            1000
+        ).toFixed(3) +
+        " segundos"
+    );
+
+    Logger.log("==========================================");
+    Logger.log("FIM DA ATUALIZAÇÃO");
+    Logger.log("==========================================");
+}
+
+
+// ==========================================================
+// GARANTE CABEÇALHO
+// ==========================================================
+//
+// Não reescreve os dados existentes.
+// Apenas verifica a estrutura.
+//
+// ==========================================================
+
+function garantirCabecalho(sheet) {
+
+    if (sheet.getLastRow() === 0) {
+
+        sheet
+            .getRange(
+                1,
+                1,
+                1,
+                HEADERS.length
+            )
+            .setValues([
+                HEADERS
+            ]);
+
+        sheet.setFrozenRows(1);
+
+        return;
+    }
+
+
+    var headers =
+        sheet
+            .getRange(
+                1,
+                1,
+                1,
+                HEADERS.length
+            )
+            .getValues()[0];
+
+
+    for (
+        var i = 0;
+        i < HEADERS.length;
+        i++
+    ) {
+
+        if (
+            headers[i] !==
+            HEADERS[i]
+        ) {
+
+            throw new Error(
+                "Estrutura da planilha diferente da esperada. " +
+                "A coluna " +
+                (i + 1) +
+                " deveria ser '" +
+                HEADERS[i] +
+                "'."
+            );
+
+        }
+    }
+}
+
+
+// ==========================================================
+// CRIA RICH TEXT COM LINK
+// ==========================================================
+
+function criarRichTextLink(
+    texto,
+    url
+) {
+
+    return SpreadsheetApp
+        .newRichTextValue()
+        .setText(
+            texto || ""
+        )
+        .setLinkUrl(
+            url || ""
+        )
+        .build();
+}
+
+
+// ==========================================================
+// RESTAURA LINKS DA COLUNA A
+// ==========================================================
+//
+// Usa:
+//
+// COLUNA I → ID
+//       ↓
+// Google Drive
+//       ↓
+// nome + URL
+//       ↓
+// COLUNA A
+//
+// Não altera B, C, D, E, F, G ou H.
+//
+// ==========================================================
+
+function restaurarLinksNomes() {
+
+    var inicio =
+        new Date().getTime();
+
+
+    Logger.log("==========================================");
+    Logger.log("RESTAURAÇÃO DOS LINKS");
+    Logger.log("==========================================");
+
+
+    var ss =
+        SpreadsheetApp.getActiveSpreadsheet();
+
+    var sheet =
+        ss.getSheetByName(
+            SHEET_NAME
+        );
+
+
+    if (!sheet) {
+
+        throw new Error(
+            "A aba '" +
+            SHEET_NAME +
+            "' não existe."
+        );
+
+    }
+
+
+    var lastRow =
+        sheet.getLastRow();
+
+
+    if (lastRow < 2) {
+
+        Logger.log(
+            "Nenhum registro encontrado."
+        );
+
+        return;
+    }
+
+
+    // ------------------------------------------------------
+    // LÊ IDs
+    // ------------------------------------------------------
+
+    var ids =
+        sheet
+            .getRange(
+                2,
+                9,
+                lastRow - 1,
+                1
+            )
+            .getValues();
+
+
+    // ------------------------------------------------------
+    // LÊ TEXTO ATUAL DA COLUNA A
+    //
+    // Usado somente se um ID não for encontrado.
+    // ------------------------------------------------------
+
+    var nomesAtuais =
+        sheet
+            .getRange(
+                2,
+                1,
+                lastRow - 1,
+                1
+            )
+            .getDisplayValues();
+
+
+    // ------------------------------------------------------
+    // MONTA LINKS
+    // ------------------------------------------------------
+
+    var richValues = [];
+
+    var restaurados = 0;
+
+    var naoEncontrados = 0;
+
+    var semID = 0;
+
+
+    for (
+        var r = 0;
+        r < ids.length;
+        r++
+    ) {
+
+        var id =
+            String(
+                ids[r][0] || ""
+            ).trim();
+
+
+        // --------------------------------------------------
+        // Sem ID
+        // --------------------------------------------------
+
+        if (!id) {
+
+            semID++;
+
+            richValues.push([
+
+                criarRichTextLink(
+                    nomesAtuais[r][0],
+                    ""
+                )
+
+            ]);
+
+            continue;
+        }
+
+
+        // --------------------------------------------------
+        // Busca direta pelo ID
+        // --------------------------------------------------
+
+        var file = null;
+
+        try {
+
+            file =
+                DriveApp.getFileById(
+                    id
+                );
+
+        } catch (e) {
+
+            file = null;
+
+        }
+
+
+        // --------------------------------------------------
+        // Arquivo não encontrado
+        // --------------------------------------------------
+
+        if (!file) {
+
+            naoEncontrados++;
+
+            richValues.push([
+
+                criarRichTextLink(
+                    nomesAtuais[r][0],
+                    ""
+                )
+
+            ]);
+
+            continue;
+        }
+
+
+        // --------------------------------------------------
+        // Arquivo encontrado
+        // --------------------------------------------------
+
+        richValues.push([
+
+            criarRichTextLink(
+                file.getName(),
+                file.getUrl()
+            )
+
+        ]);
+
+
+        restaurados++;
+
+    }
+
+
+    // ------------------------------------------------------
+    // GRAVA SOMENTE COLUNA A
+    // ------------------------------------------------------
+
+    sheet
+        .getRange(
+            2,
+            1,
+            richValues.length,
+            1
+        )
+        .setRichTextValues(
+            richValues
+        );
+
+
+    SpreadsheetApp.flush();
+
+
+    var fim =
+        new Date().getTime();
+
+
+    Logger.log("");
+    Logger.log("==========================================");
+    Logger.log("RESUMO");
+    Logger.log("==========================================");
+
+    Logger.log(
+        "Links restaurados: " +
+        restaurados
+    );
+
+    Logger.log(
+        "IDs sem arquivo: " +
+        naoEncontrados
+    );
+
+    Logger.log(
+        "Linhas sem ID: " +
+        semID
+    );
+
+    Logger.log(
+        "Tempo total: " +
+        (
+            (fim - inicio) /
+            1000
+        ).toFixed(3) +
+        " segundos"
+    );
+
+    Logger.log("==========================================");
+    Logger.log("FIM DA RESTAURAÇÃO");
+    Logger.log("==========================================");
+}
+
+
+// ==========================================================
+// ATUALIZAÇÃO DOS METADADOS
+// ==========================================================
+//
+// Processa até 30 registros por execução.
+//
+// IMPORTANTE:
+//
+// O arquivo é localizado DIRETAMENTE pelo ID da coluna I.
+//
+// Não é necessário procurar novamente os 1.770 PDFs.
+//
+// ==========================================================
+
+function atualizarMetadados() {
+
+    var lock =
+        LockService.getScriptLock();
+
+
+    try {
+
+        lock.waitLock(10000);
+
+    } catch (e) {
+
+        Logger.log(
+            "Atualização de metadados ignorada: " +
+            "outra instância está rodando."
+        );
+
+        return;
+    }
+
+
+    try {
+
+        atualizarMetadadosInterno();
+
+    } finally {
+
+        lock.releaseLock();
+
+    }
+}
+
+
+// ==========================================================
+// METADADOS - PROCESSAMENTO INTERNO
+// ==========================================================
+
+function atualizarMetadadosInterno() {
+
+    var inicioTotal =
+        new Date().getTime();
+
+
+    Logger.log("==========================================");
+    Logger.log(
+        "ATUALIZAÇÃO DE METADADOS - LOTE DE " +
+        LIMITE_METADADOS
+    );
+    Logger.log("==========================================");
+
+
+    var ss =
+        SpreadsheetApp.getActiveSpreadsheet();
+
+    var sheet =
+        ss.getSheetByName(
+            SHEET_NAME
+        );
+
+
+    if (!sheet) {
+
+        throw new Error(
+            "A aba '" +
+            SHEET_NAME +
+            "' não existe."
+        );
+
+    }
+
+
+    var lastRow =
+        sheet.getLastRow();
+
+
+    if (lastRow < 2) {
+
+        Logger.log(
+            "Não existem arquivos catalogados."
+        );
+
+        return;
+    }
+
+
+    // ------------------------------------------------------
+    // LOCALIZA AS COLUNAS PELO CABEÇALHO
+    // ------------------------------------------------------
+
+    var headers =
+        sheet
+            .getRange(
+                1,
+                1,
+                1,
+                9
+            )
+            .getValues()[0];
+
+
+    var colCreator =
+        headers.indexOf(
+            "Creator"
+        ) + 1;
+
+
+    var colCreationDate =
+        headers.indexOf(
+            "Data de criação do arquivo"
+        ) + 1;
+
+
+    var colID =
+        headers.indexOf(
+            "ID do arquivo (não editar)"
+        ) + 1;
+
+
+    if (!colCreator) {
+
+        throw new Error(
+            "Coluna 'Creator' não encontrada."
+        );
+
+    }
+
+
+    if (!colCreationDate) {
+
+        throw new Error(
+            "Coluna 'Data de criação do arquivo' não encontrada."
+        );
+
+    }
+
+
+    if (!colID) {
+
+        throw new Error(
+            "Coluna 'ID do arquivo (não editar)' não encontrada."
+        );
+
+    }
+
+
+    // ------------------------------------------------------
+    // LÊ DADOS
+    // ------------------------------------------------------
+
+    var data =
+        sheet
+            .getRange(
+                2,
+                1,
+                lastRow - 1,
+                9
+            )
+            .getValues();
+
+
+    var processados = 0;
+
+    var pulados = 0;
+
+    var erros = 0;
+
+    var naoEncontrados = 0;
+
+
+    // ======================================================
+    // PERCORRE PLANILHA
+    // ======================================================
+
+    for (
+        var r = 0;
+        r < data.length;
+        r++
+    ) {
+
+
+        if (
+            processados >=
+            LIMITE_METADADOS
+        ) {
+
+            break;
+
+        }
+
+
+        var rowNumber =
+            r + 2;
+
+
+        var id =
+            String(
+                data[r][colID - 1] || ""
+            ).trim();
+
+
+        // --------------------------------------------------
+        // SEM ID
+        // --------------------------------------------------
+
+        if (!id) {
+
+            continue;
+
+        }
+
+
+        var creatorAtual =
+            String(
+                data[r][colCreator - 1] ||
+                ""
+            ).trim();
+
+
+        var creationDateAtual =
+            String(
+                data[r][colCreationDate - 1] ||
+                ""
+            ).trim();
+
+
+        // --------------------------------------------------
+        // JÁ POSSUI OS DOIS METADADOS
+        // --------------------------------------------------
+
+        if (
+            creatorAtual &&
+            creationDateAtual
+        ) {
+
+            pulados++;
+
+            continue;
+
+        }
+
+
+        // --------------------------------------------------
+        // LOCALIZA DIRETAMENTE PELO ID
+        // --------------------------------------------------
+
+        var file = null;
+
+
+        try {
+
+            file =
+                DriveApp.getFileById(
+                    id
+                );
+
+        } catch (e) {
+
+            file = null;
+
+        }
+
+
+        if (!file) {
+
+            naoEncontrados++;
+
+            Logger.log(
+                "Arquivo não encontrado: " +
+                id
+            );
+
+            continue;
+
+        }
+
+
+        // --------------------------------------------------
+        // LOG
+        // --------------------------------------------------
+
+        Logger.log("");
+        Logger.log("------------------------------------------");
+
+        Logger.log(
+            "PROCESSANDO " +
+            (processados + 1) +
+            "/" +
+            LIMITE_METADADOS
+        );
+
+        Logger.log("------------------------------------------");
+
+        Logger.log(
+            "Linha: " +
+            rowNumber
+        );
+
+        Logger.log(
+            "Nome: " +
+            file.getName()
+        );
+
+        Logger.log(
+            "ID: " +
+            id
+        );
+
+        Logger.log(
+            "Tamanho: " +
+            (
+                file.getSize() /
+                (1024 * 1024)
+            ).toFixed(2) +
+            " MB"
+        );
+
+
+        var inicioArquivo =
+            new Date().getTime();
+
+
+        try {
+
+            // ==================================================
+            // DOWNLOAD DO PDF
+            // ==================================================
+
+            var inicioDownload =
+                new Date().getTime();
+
+
+            var url =
+                "https://www.googleapis.com/drive/v3/files/" +
+                encodeURIComponent(id) +
+                "?alt=media";
+
+
+            var response =
+                UrlFetchApp.fetch(
+                    url,
+                    {
+                        headers: {
+                            Authorization:
+                                "Bearer " +
+                                ScriptApp.getOAuthToken()
+                        },
+
+                        muteHttpExceptions: true
+                    }
+                );
+
+
+            var codigo =
+                response.getResponseCode();
+
+
+            if (codigo !== 200) {
+
+                throw new Error(
+                    "HTTP " +
+                    codigo +
+                    ": " +
+                    response.getContentText()
+                );
+
+            }
+
+
+            var bytes =
+                response
+                    .getBlob()
+                    .getBytes();
+
+
+            var fimDownload =
+                new Date().getTime();
+
+
+            Logger.log(
+                "Download: " +
+                (
+                    (fimDownload -
+                        inicioDownload) /
+                    1000
+                ).toFixed(3) +
+                " segundos"
+            );
+
+
+            Logger.log(
+                "Bytes recebidos: " +
+                bytes.length
+            );
+
+
+            // ==================================================
+            // ANÁLISE DO PDF
+            // ==================================================
+
+            var inicioAnalise =
+                new Date().getTime();
+
+
+            var pdfText =
+                bytesToLatin1(
+                    bytes
+                );
+
+
+            // --------------------------------------------------
+            // CREATOR
+            // --------------------------------------------------
+
+            var creator =
+                extrairCampoPDF(
+                    pdfText,
+                    "Creator"
+                );
+
+
+            // --------------------------------------------------
+            // CREATION DATE
+            // --------------------------------------------------
+
+            var creationDateOriginal =
+                extrairCampoPDF(
+                    pdfText,
+                    "CreationDate"
+                );
+
+
+            // --------------------------------------------------
+            // TENTA XMP
+            // --------------------------------------------------
+
+            if (!creator) {
+
+                creator =
+                    extrairXMP(
+                        pdfText,
+                        [
+                            "xmp:CreatorTool",
+                            "pdf:Creator"
+                        ]
+                    );
+
+            }
+
+
+            if (!creationDateOriginal) {
+
+                creationDateOriginal =
+                    extrairXMP(
+                        pdfText,
+                        [
+                            "xmp:CreateDate",
+                            "pdf:CreationDate"
+                        ]
+                    );
+
+            }
+
+
+            var creationDateFormatada =
+                converterCreationDatePDF(
+                    creationDateOriginal
+                );
+
+
+            var fimAnalise =
+                new Date().getTime();
+
+
+            Logger.log(
+                "Análise: " +
+                (
+                    (fimAnalise -
+                        inicioAnalise) /
+                    1000
+                ).toFixed(3) +
+                " segundos"
+            );
+
+
+            Logger.log(
+                "CREATOR: " +
+                (
+                    creator ||
+                    "[não encontrado]"
+                )
+            );
+
+
+            Logger.log(
+                "CREATION DATE ORIGINAL: " +
+                (
+                    creationDateOriginal ||
+                    "[não encontrado]"
+                )
+            );
+
+
+            Logger.log(
+                "CREATION DATE FORMATADA: " +
+                (
+                    creationDateFormatada ||
+                    "[não encontrado]"
+                )
+            );
+
+
+            // ==================================================
+            // GRAVA SOMENTE OS METADADOS
+            // ==================================================
+            //
+            // A coluna A NÃO é tocada.
+            //
+            // O ID NÃO é tocado.
+            //
+            // Usuário/Data de postagem NÃO são tocados.
+            //
+            // ==================================================
+
+            if (
+                !creatorAtual &&
+                creator
+            ) {
+
+                sheet
+                    .getRange(
+                        rowNumber,
+                        colCreator
+                    )
+                    .setValue(
+                        creator
+                    );
+
+            }
+
+
+            if (
+                !creationDateAtual &&
+                creationDateFormatada
+            ) {
+
+                sheet
+                    .getRange(
+                        rowNumber,
+                        colCreationDate
+                    )
+                    .setValue(
+                        creationDateFormatada
+                    );
+
+            }
+
+
+            var fimArquivo =
+                new Date().getTime();
+
+
+            Logger.log(
+                "Tempo total do arquivo: " +
+                (
+                    (fimArquivo -
+                        inicioArquivo) /
+                    1000
+                ).toFixed(3) +
+                " segundos"
+            );
+
+
+            processados++;
+
+
+        } catch (e) {
+
+            erros++;
+
+            Logger.log(
+                "ERRO ao processar arquivo:"
+            );
+
+            Logger.log(
+                e.toString()
+            );
+
+        }
+
+    }
+
+
+    SpreadsheetApp.flush();
+
+
+    // ======================================================
+    // RESUMO
+    // ======================================================
+
+    var fimTotal =
+        new Date().getTime();
+
+
+    Logger.log("");
+    Logger.log("==========================================");
+    Logger.log("RESUMO DO LOTE");
+    Logger.log("==========================================");
+
+
+    Logger.log(
+        "Processados: " +
+        processados
+    );
+
+
+    Logger.log(
+        "Pulados (já completos): " +
+        pulados
+    );
+
+
+    Logger.log(
+        "Não encontrados: " +
+        naoEncontrados
+    );
+
+
+    Logger.log(
+        "Erros: " +
+        erros
+    );
+
+
+    Logger.log(
+        "Tempo total: " +
+        (
+            (fimTotal -
+                inicioTotal) /
+            1000
+        ).toFixed(3) +
+        " segundos"
+    );
+
+
+    Logger.log("==========================================");
+    Logger.log("FIM DO LOTE");
+    Logger.log("==========================================");
+}
+
+
+// ==========================================================
+// LOCALIZA TODOS OS PDFs RECURSIVAMENTE
+// ==========================================================
+
+function scanFolderRecursive(
+    folder,
+    results
+) {
+
+    var files =
+        folder.getFilesByType(
+            MimeType.PDF
+        );
+
+
+    while (
+        files.hasNext()
+    ) {
+
+        results.push(
+            files.next()
+        );
+
+    }
+
+
+    var subfolders =
+        folder.getFolders();
+
+
+    while (
+        subfolders.hasNext()
+    ) {
+
+        scanFolderRecursive(
+            subfolders.next(),
+            results
+        );
+
+    }
+}
+
+
+// ==========================================================
+// INTERPRETA O NOME DO ARQUIVO
+// ==========================================================
+//
+// Procura:
+//
+// Nome_1234
+//     → Deputado Federal
+//
+// Nome_12345
+//     → Deputado Estadual
+//
+// E identifica o tipo de peça independentemente
+// da posição.
+//
+// ==========================================================
+
+function parseFileName(
+    fileName
+) {
+
+    var base =
+        fileName.replace(
+            /\.pdf$/i,
+            ""
+        );
+
+
+    var tokens =
+        base.split("_");
+
+
+    var deputadoFederal =
+        "";
+
+    var deputadoEstadual =
+        "";
+
+    var tipoFormatado =
+        "";
+
+
+    var nomeRegex =
+        /^[A-Za-zÀ-ÿ]+$/;
+
+
+    // ------------------------------------------------------
+    // Deputados
+    // ------------------------------------------------------
+
+    for (
+        var i = 1;
+        i < tokens.length;
+        i++
+    ) {
+
+        var tok =
+            tokens[i];
+
+        var prev =
+            tokens[i - 1];
+
+
+        if (
+            !deputadoFederal &&
+            /^\d{4}$/.test(tok) &&
+            nomeRegex.test(prev)
+        ) {
+
+            deputadoFederal =
+                prev +
+                " " +
+                tok;
+
+        }
+
+
+        if (
+            !deputadoEstadual &&
+            /^\d{5}$/.test(tok) &&
+            nomeRegex.test(prev)
+        ) {
+
+            deputadoEstadual =
+                prev +
+                " " +
+                tok;
+
+        }
+
+    }
+
+
+    // ------------------------------------------------------
+    // Tipo
+    // ------------------------------------------------------
+
+    for (
+        var j = 0;
+        j < tokens.length;
+        j++
+    ) {
+
+        var key =
+            removeAcentos(
+                tokens[j].toLowerCase()
+            );
+
+
+        if (
+            TIPO_MAP[key]
+        ) {
+
+            tipoFormatado =
+                TIPO_MAP[key];
+
+            break;
+
+        }
+
+    }
+
+
+    return {
+
+        deputadoFederal:
+            deputadoFederal,
+
+        deputadoEstadual:
+            deputadoEstadual,
+
+        tipo:
+            tipoFormatado
+
+    };
+}
+
+
+// ==========================================================
+// REMOVE ACENTOS
+// ==========================================================
+
+function removeAcentos(
+    str
+) {
+
+    return String(str || "")
+        .normalize("NFD")
+        .replace(
+            /[\u0300-\u036f]/g,
+            ""
+        );
+
+}
+
+
+// ==========================================================
+// CONVERTE BYTES DO PDF PARA LATIN-1
+// ==========================================================
+
+function bytesToLatin1(
+    bytes
+) {
+
+    var chars = [];
+
+
+    for (
+        var i = 0;
+        i < bytes.length;
+        i++
+    ) {
+
+        var b =
+            bytes[i];
+
+
+        if (b < 0) {
+
+            b += 256;
+
+        }
+
+
+        chars.push(
+            String.fromCharCode(b)
+        );
+
+    }
+
+
+    return chars.join("");
+
+}
+
+
+// ==========================================================
+// EXTRAI CAMPO PDF
+// ==========================================================
+//
+// Exemplo:
+//
+// /Creator (Adobe Illustrator 30.7 (Macintosh))
+//
+// Aceita parênteses dentro do valor.
+//
+// ==========================================================
+
+function extrairCampoPDF(
+    texto,
+    campo
+) {
+
+    var inicio =
+        texto.search(
+            new RegExp(
+                "\\/" +
+                campo +
+                "\\s*\\(",
+                "i"
+            )
+        );
+
+
+    if (
+        inicio === -1
+    ) {
+
+        return "";
+
+    }
+
+
+    var abertura =
+        texto.indexOf(
+            "(",
+            inicio
+        );
+
+
+    if (
+        abertura === -1
+    ) {
+
+        return "";
+
+    }
+
+
+    var resultado =
+        "";
+
+    var nivel =
+        0;
+
+    var escapado =
+        false;
+
+
+    for (
+        var i = abertura + 1;
+        i < texto.length;
+        i++
+    ) {
+
+        var caractere =
+            texto.charAt(i);
+
+
+        // --------------------------------------------------
+        // Caractere escapado
+        // --------------------------------------------------
+
+        if (
+            escapado
+        ) {
+
+            resultado +=
+                caractere;
+
+            escapado =
+                false;
+
+            continue;
+        }
+
+
+        if (
+            caractere === "\\"
+        ) {
+
+            resultado +=
+                caractere;
+
+            escapado =
+                true;
+
+            continue;
+
+        }
+
+
+        // --------------------------------------------------
+        // Abre parêntese interno
+        // --------------------------------------------------
+
+        if (
+            caractere === "("
+        ) {
+
+            nivel++;
+
+            resultado +=
+                caractere;
+
+            continue;
+
+        }
+
+
+        // --------------------------------------------------
+        // Fecha parêntese
+        // --------------------------------------------------
+
+        if (
+            caractere === ")"
+        ) {
+
+            if (
+                nivel === 0
+            ) {
+
+                break;
+
+            }
+
+
+            nivel--;
+
+            resultado +=
+                caractere;
+
+            continue;
+
+        }
+
+
+        resultado +=
+            caractere;
+
+    }
+
+
+    return limparTextoPDF(
+        resultado
+    );
+}
+
+
+// ==========================================================
+// EXTRAI CAMPOS XMP/XML
+// ==========================================================
+
+function extrairXMP(
+    texto,
+    campos
+) {
+
+    for (
+        var i = 0;
+        i < campos.length;
+        i++
+    ) {
+
+        var campo =
+            campos[i];
+
+
+        var partes =
+            campo.split(":");
+
+
+        if (
+            partes.length !== 2
+        ) {
+
+            continue;
+
+        }
+
+
+        var namespace =
+            partes[0];
+
+        var nome =
+            partes[1];
+
+
+        var regex =
+            new RegExp(
+                "<" +
+                namespace +
+                ":" +
+                nome +
+                "[^>]*>" +
+                "([\\s\\S]*?)" +
+                "<\\/" +
+                namespace +
+                ":" +
+                nome +
+                ">",
+                "i"
+            );
+
+
+        var match =
+            texto.match(
+                regex
+            );
+
+
+        if (
+            match
+        ) {
+
+            return limparTextoPDF(
+                match[1]
+            );
+
+        }
+
+    }
+
+
+    return "";
+}
+
+
+// ==========================================================
+// LIMPEZA DE TEXTO PDF
+// ==========================================================
+
+function limparTextoPDF(
+    valor
+) {
+
+    if (!valor) {
+
+        return "";
+
+    }
+
+
+    return String(valor)
+
+        .replace(
+            /\\\(/g,
+            "("
+        )
+
+        .replace(
+            /\\\)/g,
+            ")"
+        )
+
+        .replace(
+            /\\\\/g,
+            "\\"
+        )
+
+        .replace(
+            /\s+/g,
+            " "
+        )
+
+        .trim();
+
+}
+
+
+// ==========================================================
+// CONVERTE CREATION DATE
+// ==========================================================
+//
+// Aceita:
+//
+// D:20260817153208-03'00'
+//
+// e:
+//
+// 2026-08-19T19:05:33-03:00
+//
+// Resultado:
+//
+// dd/MM/yyyy HH:mm
+//
+// ==========================================================
+
+function converterCreationDatePDF(
+    valor
+) {
+
+    if (!valor) {
+
+        return "";
+
+    }
+
+
+    valor =
+        String(valor).trim();
+
+
+    // ======================================================
+    // FORMATO PDF
+    // ======================================================
+
+    var matchPDF =
+        valor.match(
+            /^D:(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/
+        );
+
+
+    if (
+        matchPDF
+    ) {
+
+        var ano =
+            Number(matchPDF[1]);
+
+        var mes =
+            Number(matchPDF[2]);
+
+        var dia =
+            Number(matchPDF[3]);
+
+        var hora =
+            Number(matchPDF[4]);
+
+        var minuto =
+            Number(matchPDF[5]);
+
+        var segundo =
+            Number(matchPDF[6]);
+
+
+        var dataPDF =
+            new Date(
+                ano,
+                mes - 1,
+                dia,
+                hora,
+                minuto,
+                segundo
+            );
+
+
+        if (
+            !isNaN(
+                dataPDF.getTime()
+            )
+        ) {
+
+            return Utilities.formatDate(
+                dataPDF,
+                Session.getScriptTimeZone(),
+                "dd/MM/yyyy HH:mm"
+            );
+
+        }
+
+    }
+
+
+    // ======================================================
+    // FORMATO ISO
+    // ======================================================
+
+    var matchISO =
+        valor.match(
+            /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/
+        );
+
+
+    if (
+        matchISO
+    ) {
+
+        var anoISO =
+            Number(matchISO[1]);
+
+        var mesISO =
+            Number(matchISO[2]);
+
+        var diaISO =
+            Number(matchISO[3]);
+
+        var horaISO =
+            Number(matchISO[4]);
+
+        var minutoISO =
+            Number(matchISO[5]);
+
+        var segundoISO =
+            Number(matchISO[6]);
+
+
+        var dataISO =
+            new Date(
+                anoISO,
+                mesISO - 1,
+                diaISO,
+                horaISO,
+                minutoISO,
+                segundoISO
+            );
+
+
+        if (
+            !isNaN(
+                dataISO.getTime()
+            )
+        ) {
+
+            return Utilities.formatDate(
+                dataISO,
+                Session.getScriptTimeZone(),
+                "dd/MM/yyyy HH:mm"
+            );
+
+        }
+
+    }
+
+
+    return "";
+}
+
+
+// ==========================================================
+// CRIA / RECRIA GATILHOS
+// ==========================================================
+//
+// Somente atualizarPlanilha é automático.
+//
+// NÃO colocamos atualizarMetadados aqui.
+//
+// Isso evita que uma execução pesada de PDFs seja disparada
+// automaticamente junto com a sincronização.
+//
+// ==========================================================
+
+function criarGatilhos() {
+
+    var ss =
+        SpreadsheetApp
+            .getActiveSpreadsheet();
+
+
+    var triggers =
+        ScriptApp
+            .getProjectTriggers();
+
+
+    // ------------------------------------------------------
+    // Remove gatilhos antigos de atualizarPlanilha
+    // ------------------------------------------------------
+
+    triggers.forEach(
+        function (trigger) {
+
+            if (
+                trigger.getHandlerFunction() ===
+                "atualizarPlanilha"
+            ) {
+
+                ScriptApp.deleteTrigger(
+                    trigger
+                );
+
+            }
+
+        }
+    );
+
+
+    // ------------------------------------------------------
+    // Gatilho a cada 15 minutos
+    // ------------------------------------------------------
+
+    ScriptApp
+        .newTrigger(
+            "atualizarPlanilha"
+        )
+        .timeBased()
+        .everyMinutes(15)
+        .create();
+
+
+    // ------------------------------------------------------
+    // Gatilho ao abrir a planilha
+    // ------------------------------------------------------
+
+    ScriptApp
+        .newTrigger(
+            "atualizarPlanilha"
+        )
+        .forSpreadsheet(ss)
+        .onOpen()
+        .create();
+
+
+    Logger.log(
+        "Gatilhos de atualizarPlanilha recriados."
+    );
+
+}
+
+
+// ==========================================================
+// CONFIGURAÇÃO INICIAL
+// ==========================================================
+//
+// Use somente se precisar recriar os gatilhos.
+//
+// Não é necessário para os dados atuais.
+//
+// ==========================================================
+
+function configurarTudo() {
+
+    criarGatilhos();
+
+    atualizarPlanilha();
+
+}
